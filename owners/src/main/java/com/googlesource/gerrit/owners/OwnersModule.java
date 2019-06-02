@@ -15,11 +15,11 @@
 
 package com.googlesource.gerrit.owners;
 
+import com.google.gerrit.extensions.config.FactoryModule;
 import com.google.gerrit.extensions.registration.DynamicSet;
 import com.google.gerrit.server.rules.PredicateProvider;
-import com.google.inject.AbstractModule;
 
-public class OwnersModule extends AbstractModule {
+public class OwnersModule extends FactoryModule {
   @Override
   protected void configure() {
     DynamicSet.bind(binder(), PredicateProvider.class)

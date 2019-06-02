@@ -20,23 +20,17 @@ import static com.google.gerrit.reviewdb.client.Patch.COMMIT_MSG;
 import static com.google.gerrit.reviewdb.client.Patch.MERGE_LIST;
 import static com.googlesource.gerrit.owners.common.JgitWrapper.getBlobAsBytes;
 
-import com.google.common.collect.Maps;
-import com.google.common.collect.Multimaps;
-import com.google.common.collect.SetMultimap;
-import com.google.common.collect.Sets;
-import com.google.gerrit.reviewdb.client.Account;
+import com.google.common.collect.*;
+import com.google.gerrit.extensions.client.DiffPreferencesInfo;
+import com.google.gerrit.reviewdb.client.*;
 import com.google.gerrit.reviewdb.client.Account.Id;
-import com.google.gerrit.reviewdb.client.Patch;
-import com.google.gerrit.reviewdb.client.RefNames;
-import com.google.gerrit.server.patch.PatchList;
-import com.google.gerrit.server.patch.PatchListEntry;
+import com.google.gerrit.server.patch.*;
+
 import java.io.IOException;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.Map;
-import java.util.Optional;
-import java.util.Set;
+import java.util.*;
+
+import com.google.gerrit.server.query.change.ChangeData;
+import org.eclipse.jgit.lib.ObjectId;
 import org.eclipse.jgit.lib.Repository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -57,15 +51,26 @@ public class PathOwners {
 
   private final Accounts accounts;
 
+  private final ChangeData changeData;
+
+  private PatchListCache patchListCache;
+
   private Map<String, Matcher> matchers;
 
   private Map<String, Set<Id>> fileOwners;
 
-  public PathOwners(Accounts accounts, Repository repository, String branch, PatchList patchList) {
+  public PathOwners(Accounts accounts,
+                    Repository repository,
+                    String branch,
+                    PatchList patchList,
+                    ChangeData changeData,
+                    PatchListCache patchListCache) {
     this.repository = repository;
     this.patchList = patchList;
     this.parser = new ConfigurationParser(accounts);
     this.accounts = accounts;
+    this.changeData = changeData;
+    this.patchListCache = patchListCache;
 
     OwnersMap map = fetchOwners(branch);
     owners = Multimaps.unmodifiableSetMultimap(map.getPathOwners());
@@ -133,6 +138,9 @@ public class PathOwners {
         HashMap<String, Matcher> newMatchers = Maps.newHashMap();
         // extra loop
         for (String path : modifiedPaths) {
+          if (!hasPathChangedAfterLastApproval(path, ownersMap.getMatchers())) {
+            continue;
+          }
           processMatcherPerPath(matchers, newMatchers, path, ownersMap);
         }
         if (matchers.size() != newMatchers.size()) {
@@ -214,6 +222,114 @@ public class PathOwners {
     return currentEntry;
   }
 
+
+  private Optional<DiffSummary> getDiffSummaryBetweenPatchSets(PatchSet patchSetBase, PatchSet patchSetTarget) {
+    Optional<DiffSummary> diffSummary;
+
+    ObjectId patchSetBaseCommitId = null;
+    if (patchSetBase != null) {
+      patchSetBaseCommitId = ObjectId.fromString(patchSetBase.getRevision().get());
+    }
+
+    ObjectId patchSetTargetCommitId = ObjectId.fromString(patchSetTarget.getRevision().get());
+
+    PatchListKey patchListKey = PatchListKey.againstCommit(patchSetBaseCommitId, patchSetTargetCommitId,
+            DiffPreferencesInfo.Whitespace.IGNORE_NONE);
+
+    DiffSummaryKey key = DiffSummaryKey.fromPatchListKey(patchListKey);
+    try {
+      diffSummary = Optional.of(patchListCache.getDiffSummary(key, changeData.project()));
+    } catch (PatchListNotAvailableException e) {
+      diffSummary = Optional.empty();
+    }
+
+    return diffSummary;
+  }
+
+  private Optional<Matcher> findPathMatcher(String path, Map<String, Matcher> pathOwners) {
+    Iterator<Matcher> it = pathOwners.values().iterator();
+    while (it.hasNext()) {
+      Matcher matcher = it.next();
+      if (matcher.matches(path)) {
+        return Optional.of(matcher);
+      }
+    }
+
+    return Optional.empty();
+  }
+
+  private boolean hasFileOwnerApprovedPatchSet(String path, PatchSet patchSet, Map<String, Matcher> pathOwners) {
+    if (pathOwners.isEmpty()) {
+      return false;
+    }
+
+    Optional<Matcher> matcher = findPathMatcher(path, pathOwners);
+
+    if (!matcher.isPresent()) {
+      return false;
+    }
+    for (Id fileOwner : matcher.get().getOwners()) {
+      for (PatchSetApproval approval : changeData.approvals().get(patchSet.getId())) {
+        if (approval.getAccountId().equals(fileOwner) && approval.getValue() == 2) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  private boolean hasPathChangedInBetweenPatchSets(String path, PatchSet basePatchSet, PatchSet currentPatchSet) {
+    if (changeData == null) {
+      return false;
+    }
+
+    Optional<DiffSummary> diffSummary = getDiffSummaryBetweenPatchSets(basePatchSet, currentPatchSet);
+    if (!diffSummary.isPresent()) {
+      return false;
+    }
+    List<String> modifiedPaths = diffSummary.get().getPaths();
+    return modifiedPaths.contains(path);
+  }
+
+  /**
+   * if path was never approved it returns true
+   * if path was approved but never changed it's diff with base after that, it returns false
+   * else if path was approved and has changed since last approval it returns true
+   */
+  private boolean hasPathChangedAfterLastApproval(String path, Map<String, Matcher> pathOwners) {
+    ArrayList<PatchSet> patchSets = new ArrayList<>(changeData.patchSets());
+
+    if (patchSets.isEmpty() || patchSets.size() <= 1) {
+      return true;
+    }
+
+    // go through every patch-set and check if file was approved and not modified afterwards
+    PatchSet pathPatchSet = null;
+    Map<String, PatchSet.Id> pathApprovals = new HashMap<>();
+    for(PatchSet currentPatchSet : patchSets) {
+      // check if path has changed between currentPatchSet set and pathPatchSet
+      // and check if patch-set was approved by file owner is approved in patch-set
+      // if yes store into map<path, PatchSet.id>
+      if (hasPathChangedInBetweenPatchSets(path, pathPatchSet, currentPatchSet)) {
+        if (hasFileOwnerApprovedPatchSet(path, currentPatchSet, pathOwners)) {
+          pathPatchSet = currentPatchSet;
+          pathApprovals.put(path, pathPatchSet.getId());
+        } else {
+          pathApprovals.remove(path);
+        }
+      }
+    }
+
+    // if path set associated with path in map is equal to the last patch set (by id) then path is not approved
+    // otherwise path is approved
+    if (pathApprovals.isEmpty()) {
+      return true;
+    } else if (pathApprovals.containsKey(path)) {
+      return pathApprovals.get(path).equals(changeData.currentPatchSet().getId());
+    }
+    return true;
+  }
+
   /**
    * Parses the patch list for any paths that were modified.
    *
@@ -221,6 +337,7 @@ public class PathOwners {
    */
   private Set<String> getModifiedPaths() {
     Set<String> paths = Sets.newHashSet();
+
     for (PatchListEntry patch : patchList.getPatches()) {
       // Ignore commit message and Merge List
       String newName = patch.getNewName();

@@ -18,6 +18,8 @@ package com.googlesource.gerrit.owners;
 
 import com.google.common.collect.ImmutableSet;
 import com.google.gerrit.extensions.annotations.Listen;
+import com.google.gerrit.server.patch.PatchListCache;
+import com.google.gerrit.server.query.change.ChangeData;
 import com.google.gerrit.server.rules.PredicateProvider;
 import com.google.inject.Inject;
 import com.googlesource.gerrit.owners.common.Accounts;
@@ -26,8 +28,8 @@ import com.googlesource.gerrit.owners.common.Accounts;
 @Listen
 public class OwnerPredicateProvider implements PredicateProvider {
   @Inject
-  public OwnerPredicateProvider(Accounts accounts) {
-    OwnersStoredValues.initialize(accounts);
+  public OwnerPredicateProvider(Accounts accounts, ChangeData.Factory changeDataFactory, PatchListCache patchListCache) {
+    OwnersStoredValues.initialize(accounts, changeDataFactory, patchListCache);
   }
 
   @Override

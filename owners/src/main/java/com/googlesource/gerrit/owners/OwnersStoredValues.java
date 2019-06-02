@@ -16,7 +16,11 @@
 
 package com.googlesource.gerrit.owners;
 
+import com.google.gerrit.reviewdb.client.Change;
+import com.google.gerrit.reviewdb.client.Project;
 import com.google.gerrit.server.patch.PatchList;
+import com.google.gerrit.server.patch.PatchListCache;
+import com.google.gerrit.server.query.change.ChangeData;
 import com.google.gerrit.server.rules.StoredValue;
 import com.google.gerrit.server.rules.StoredValues;
 import com.googlecode.prolog_cafe.lang.Prolog;
@@ -32,7 +36,7 @@ public class OwnersStoredValues {
 
   public static StoredValue<PathOwners> PATH_OWNERS;
 
-  public static synchronized void initialize(Accounts accounts) {
+  public static synchronized void initialize(Accounts accounts, ChangeData.Factory changeDataFactory, PatchListCache patchListCache) {
     if (PATH_OWNERS != null) {
       return;
     }
@@ -41,10 +45,14 @@ public class OwnersStoredValues {
         new StoredValue<PathOwners>() {
           @Override
           protected PathOwners createValue(Prolog engine) {
+            Change.Id changeId = StoredValues.getChange(engine).getId();
+            Project.NameKey projectNameKey = StoredValues.getChange(engine).getProject();
+            ChangeData changeData = changeDataFactory.create(projectNameKey, changeId);
             PatchList patchList = StoredValues.PATCH_LIST.get(engine);
             Repository repository = StoredValues.REPOSITORY.get(engine);
-            String branch = StoredValues.getChange(engine).getDest().get();
-            return new PathOwners(accounts, repository, branch, patchList);
+//          String branch = StoredValues.getChange(engine).getDest().get();
+            String branch = StoredValues.getChange(engine).getDest().branch();
+            return new PathOwners(accounts, repository, branch, patchList, changeData, patchListCache);
           }
         };
   }

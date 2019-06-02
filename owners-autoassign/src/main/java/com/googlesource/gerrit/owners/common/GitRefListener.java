@@ -35,6 +35,7 @@ import com.google.gerrit.server.patch.PatchList;
 import com.google.gerrit.server.patch.PatchListCache;
 import com.google.gerrit.server.patch.PatchListKey;
 import com.google.gerrit.server.patch.PatchListNotAvailableException;
+import com.google.gerrit.server.query.change.ChangeData;
 import com.google.inject.Inject;
 import java.io.IOException;
 import java.util.Set;
@@ -53,6 +54,7 @@ public class GitRefListener implements GitReferenceUpdatedListener {
   private final GitRepositoryManager repositoryManager;
   private final Accounts accounts;
   private final ReviewerManager reviewerManager;
+  private final ChangeData.Factory changeDataFactory;
 
   @Inject
   public GitRefListener(
@@ -60,12 +62,14 @@ public class GitRefListener implements GitReferenceUpdatedListener {
       PatchListCache patchListCache,
       GitRepositoryManager repositoryManager,
       Accounts accounts,
-      ReviewerManager reviewerManager) {
+      ReviewerManager reviewerManager,
+      ChangeData.Factory changeDataFactory) {
     this.api = api;
     this.patchListCache = patchListCache;
     this.repositoryManager = repositoryManager;
     this.accounts = accounts;
     this.reviewerManager = reviewerManager;
+    this.changeDataFactory = changeDataFactory;
   }
 
   @Override
@@ -100,7 +104,9 @@ public class GitRefListener implements GitReferenceUpdatedListener {
       }
       PatchList patchList = getPatchList(event, change);
       if (patchList != null) {
-        PathOwners owners = new PathOwners(accounts, repository, change.branch, patchList);
+        Project.NameKey projectName = Project.NameKey.parse(event.getProjectName());
+        ChangeData changeData = this.changeDataFactory.create(projectName, cId);
+        PathOwners owners = new PathOwners(accounts, repository, change.branch, patchList, changeData, patchListCache);
         Set<Account.Id> allReviewers = Sets.newHashSet();
         allReviewers.addAll(owners.get().values());
         for (Matcher matcher : owners.getMatchers().values()) {
